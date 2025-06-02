@@ -1,0 +1,89 @@
+# ========================================
+#  Windows Event Monitor + GeoIP + API Push
+# Author: Xenoz | v2 Full Hardening
+# ========================================
+
+$logPath     = "$env:USERPROFILE\Desktop\mitre_events_log.txt"
+$apiEndpoint = "http://<YOUR_API_ENDPOINT>:5000/api/log"
+$geoApi      = "http://ip-api.com/json/"
+$eventIDs = @(4625, 4740, 4624, 4720, 4672, 4722, 4723, 4724, 4725, 4726, 4727, 4731, 4735, 4737, 4648, 4663, 5140, 5145, 4657, 11707, 1033, 20001, 20003, 4946, 4947, 4950, 4951, 4698, 4688, 6005, 6006, 1074, 1102, 1116, 5136, 524)
+
+$descriptionMap = @{
+    4625 = "Failed login attempt"
+    4740 = "Account lockout"
+    4624 = "Successful login / RDP"
+    4720 = "New user created"
+    4672 = "Privileged account used"
+    4722 = "Account enabled"
+    4723 = "Password change attempt"
+    4724 = "Password reset"
+    4725 = "Account disabled"
+    4726 = "Account deleted"
+    4727 = "Global group created"
+    4731 = "Local group created"
+    4735 = "Group membership changed"
+    4737 = "Global group modified"
+    4648 = "Lateral movement (network credentials)"
+    4663 = "Sensitive file access"
+    5140 = "File shared"
+    5145 = "Detailed file share access"
+    4657 = "Registry key modified"
+    11707 = "App installed"
+    1033 = "App removed"
+    20001 = "USB inserted"
+    20003 = "USB removed"
+    4946 = "Inbound rule added"
+    4947 = "Inbound rule modified"
+    4950 = "Outbound rule added"
+    4951 = "Outbound rule modified"
+    4698 = "Scheduled task created"
+    4688 = "Process created"
+    6005 = "System startup"
+    6006 = "System shutdown"
+    1074 = "Restart initiated"
+    1102 = "Audit log cleared"
+    1116 = "Malware detected"
+    5136 = "AD Object modified"
+    524   = "Shadow copy deleted"
+}
+
+Write-Host "[+] Monitoring active..."
+Write-Host "[+] Logging to: $logPath"
+Write-Host "[+] Pushing to API: $apiEndpoint"
+
+Register-WmiEvent -Query "SELECT * FROM __InstanceCreationEvent WITHIN 2 WHERE TargetInstance ISA 'Win32_NTLogEvent' AND TargetInstance.LogFile = 'Security'" -SourceIdentifier "MitreEventGeoPush" -Action {
+    $e = $Event.SourceEventArgs.NewEvent.TargetInstance
+    if ($eventIDs -contains $e.EventCode) {
+        $desc = $descriptionMap[$e.EventCode]
+        $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+        $msg = "[!] [$($e.EventCode)] $desc | Source: $($e.SourceName) | Time: $timestamp"
+        Write-Host $msg -ForegroundColor Yellow
+        Add-Content -Path $logPath -Value $msg
+
+        # GeoIP & Threat Intelligence for login
+        if ($e.EventCode -eq 4624) {
+            $ipRegex = [regex]'\d{1,3}(\.\d{1,3}){3}'
+            $ipMatch = $ipRegex.Match($e.Message)
+            if ($ipMatch.Success -and $ipMatch.Value -notlike '127.*') {
+                $ip = $ipMatch.Value
+                try {
+                    $geo = Invoke-RestMethod -Uri "$geoApi$ip" -ErrorAction Stop
+                    $geoMsg = " Login from $($geo.country), $($geo.city) | ISP: $($geo.isp)"
+                    Write-Host $geoMsg -ForegroundColor Green
+                    Add-Content -Path $logPath -Value "    ↳ $geoMsg"
+                    Invoke-RestMethod -Uri $apiEndpoint -Method POST -Body @{ timestamp = $timestamp; eventID = $e.EventCode; message = "$msg | $geoMsg" } -ErrorAction SilentlyContinue
+                } catch {
+                    Write-Host "[-] IP Geo lookup failed for $ip" -ForegroundColor Red
+                }
+            }
+        } else {
+            try {
+                Invoke-RestMethod -Uri $apiEndpoint -Method POST -Body @{ timestamp = $timestamp; eventID = $e.EventCode; message = $msg } -ErrorAction SilentlyContinue
+            } catch {
+                Write-Host "[-] Failed to push to API endpoint." -ForegroundColor Red
+            }
+        }
+    }
+}
+
+while ($true) { Start-Sleep -Seconds 2 }
